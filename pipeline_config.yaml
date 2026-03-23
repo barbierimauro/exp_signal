@@ -1,0 +1,89 @@
+# pipeline_config.yaml
+# ====================
+# Configurazione unificata per tutte le modalità della pipeline.
+#
+# Modalità disponibili  (campo "mode"):
+#   simulate       : genera serie singola sintetica, valuta detector
+#   evaluate_dual  : genera coppie di serie correlate, valuta detector duale
+#   search_file    : legge CSV (datetime ISO + 2 colonne), cerca segnali
+
+mode: evaluate_dual
+
+# ── Serie e fondo ─────────────────────────────────────────────────────────────
+series:
+  length: 50000          # campioni per realizzazione
+  n_realizations: 20     # numero di realizzazioni (solo per simulate/evaluate_dual)
+
+background:
+  k: 100.0               # fondo medio serie 1 (conteggi/campione)
+
+# ── Rumore serie 1 ────────────────────────────────────────────────────────────
+noise:
+  type: poisson          # poisson | colored | shot
+  colored:
+    exponent: 1.0        # beta: 0=bianco 1=rosa 2=marrone
+    amplitude: 15.0      # RMS del rumore colorato (conteggi)
+  shot:
+    rate: 0.005          # eventi/campione
+    amplitude_mean: 40.0
+    amplitude_std: 12.0
+
+# ── Segnali iniettati ─────────────────────────────────────────────────────────
+signals:
+  n_per_realization:
+    min: 3
+    max: 6
+  a:
+    min: 5.0             # ampiezza minima del calo (conteggi)
+    max: 80.0
+    log_scale: true
+  b:
+    min: 2.0             # scala temporale minima (campioni)
+    max: 80.0
+    log_scale: true
+  min_separation: 300    # distanza minima tra segnali (campioni)
+
+# ── Secondo canale (solo evaluate_dual) ───────────────────────────────────────
+dual:
+  k2: 80.0               # fondo medio serie 2
+
+  noise2:                # rumore indipendente della serie 2
+    type: poisson
+    colored:
+      exponent: 1.0
+      amplitude: 10.0
+    shot:
+      rate: 0.003
+      amplitude_mean: 30.0
+      amplitude_std: 10.0
+
+  fraction_both: 0.5     # frazione di segnali presenti in entrambi i canali
+  a2_factor:             # rapporto a2/a1 per i segnali "both" (campionato)
+    min: 0.3
+    max: 3.0
+    log_scale: true
+
+# ── Input CSV (solo search_file) ──────────────────────────────────────────────
+input:
+  file: data.csv
+  datetime_col: timestamp     # colonna datetime (ISO 8601)
+  series1_col:  series_A      # prima serie numerica
+  series2_col:  series_B      # seconda serie numerica (opzionale)
+  series1_label: "Series A"
+  series2_label: "Series B"
+  delimiter: ","
+  k1: null               # null = media automatica
+  k2: null
+
+# ── Detection (comune a tutte le modalità) ────────────────────────────────────
+detection:
+  fpr: 0.01              # false positive rate globale desiderato
+  n_cal: 30000           # lunghezza serie di calibrazione
+  n_sim: 200             # simulazioni Monte Carlo per la soglia
+  seed: 42
+
+# ── Output ────────────────────────────────────────────────────────────────────
+output:
+  report_file: pipeline_report.txt
+  plot_file:   pipeline_results.pdf
+  dpi: 300

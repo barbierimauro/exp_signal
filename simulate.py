@@ -17,8 +17,12 @@ degradano le prestazioni in modo fisicamente realistico.
 
 Funzioni pubbliche
 ------------------
-    load_config(path)               -> dict
-    generate_data(config, seed)     -> (data, true_signals)
+    load_config(path)                         -> dict
+    generate_data(config, seed)               -> (data, true_signals)
+    generate_dual_data(config, seed)          -> (data1, data2,
+                                                   true_both,
+                                                   true_only1,
+                                                   true_only2)
 """
 
 import numpy as np
@@ -187,3 +191,139 @@ def generate_data(
     data = rng.poisson(mu).astype(np.float64)
 
     return data, true_signals
+
+
+# ── generatore dual-channel ───────────────────────────────────────────────────
+
+def generate_dual_data(
+    config: dict,
+    seed: int | None = None,
+) -> tuple[np.ndarray, np.ndarray, list[dict], list[dict], list[dict]]:
+    """
+    Genera due serie temporali correlate per la valutazione del detector duale.
+
+    I segnali vengono classificati casualmente come:
+      - **both**  : stesso t0 e b in entrambe le serie, a1 ≠ a2
+      - **only1** : segnale solo nella serie 1
+      - **only2** : segnale solo nella serie 2
+
+    La proporzione è controllata da ``dual.fraction_both`` nel config.
+    Il rapporto a2/a1 per i segnali "both" è campionato dall'intervallo
+    ``dual.a2_factor``.
+
+    Richiede nel config le sezioni ``background``, ``noise``, ``signals``
+    (per la serie 1) e ``dual`` (per la serie 2).
+
+    Parametri
+    ---------
+    config : dict da load_config()
+    seed   : seme RNG
+
+    Ritorna
+    -------
+    data1      : array float64 — serie 1
+    data2      : array float64 — serie 2
+    true_both  : lista di dict {t0, a1, b, a2, k1, k2}
+    true_only1 : lista di dict {t0, a1, b, k1}
+    true_only2 : lista di dict {t0, a2, b, k2}
+    """
+    rng = np.random.default_rng(seed)
+
+    N          = int(config["series"]["length"])
+    k1         = float(config["background"]["k"])
+    dual_cfg   = config["dual"]
+    k2         = float(dual_cfg["k2"])
+    sig_cfg    = config["signals"]
+    noise1_cfg = config["noise"]
+    noise2_cfg = dual_cfg["noise2"]
+
+    frac_both = float(dual_cfg.get("fraction_both", 0.5))
+
+    a2f_min  = float(dual_cfg["a2_factor"]["min"])
+    a2f_max  = float(dual_cfg["a2_factor"]["max"])
+    log_a2f  = bool(dual_cfg["a2_factor"].get("log_scale", True))
+
+    # --- fondi con rumore ---
+    mu1 = np.full(N, k1, dtype=np.float64)
+    mu2 = np.full(N, k2, dtype=np.float64)
+
+    if noise1_cfg["type"] == "colored":
+        _add_colored_noise(mu1, noise1_cfg["colored"], rng)
+        np.clip(mu1, 1.0, None, out=mu1)
+    elif noise1_cfg["type"] == "shot":
+        _add_shot_noise(mu1, noise1_cfg["shot"], rng)
+
+    if noise2_cfg["type"] == "colored":
+        _add_colored_noise(mu2, noise2_cfg["colored"], rng)
+        np.clip(mu2, 1.0, None, out=mu2)
+    elif noise2_cfg["type"] == "shot":
+        _add_shot_noise(mu2, noise2_cfg["shot"], rng)
+
+    # --- parametri griglia segnali ---
+    t       = np.arange(N, dtype=np.float64)
+    n_min   = int(sig_cfg["n_per_realization"]["min"])
+    n_max   = int(sig_cfg["n_per_realization"]["max"])
+    n_sig   = int(rng.integers(n_min, n_max + 1))
+    a_min   = float(sig_cfg["a"]["min"])
+    a_max   = float(sig_cfg["a"]["max"])
+    log_a   = bool(sig_cfg["a"].get("log_scale", True))
+    b_min   = float(sig_cfg["b"]["min"])
+    b_max   = float(sig_cfg["b"]["max"])
+    log_b   = bool(sig_cfg["b"].get("log_scale", True))
+    min_sep = int(sig_cfg.get("min_separation", 200))
+
+    true_both:  list[dict] = []
+    true_only1: list[dict] = []
+    true_only2: list[dict] = []
+    occupied:   list[int]  = []
+
+    for _ in range(n_sig):
+        # campiona a1, b
+        a1 = float(np.exp(rng.uniform(np.log(a_min), np.log(a_max)))) if log_a \
+             else float(rng.uniform(a_min, a_max))
+        a1 = min(a1, k1 * 0.93)
+
+        b = float(np.exp(rng.uniform(np.log(b_min), np.log(b_max)))) if log_b \
+            else float(rng.uniform(b_min, b_max))
+
+        # cerca t0 libero
+        margin = max(min_sep, int(10 * b))
+        if margin * 2 >= N:
+            continue
+        for _ in range(300):
+            t0 = int(rng.integers(min_sep, N - margin))
+            if all(abs(t0 - o) >= min_sep for o in occupied):
+                break
+        else:
+            continue
+        occupied.append(t0)
+
+        p = float(rng.uniform())
+
+        if p < frac_both:
+            # segnale in entrambe le serie
+            fac = float(np.exp(rng.uniform(np.log(a2f_min), np.log(a2f_max)))) if log_a2f \
+                  else float(rng.uniform(a2f_min, a2f_max))
+            a2 = min(max(a1 * fac, 0.1), k2 * 0.93)
+            mu1 += _signal_profile(t, t0, a1, b)
+            mu2 += _signal_profile(t, t0, a2, b)
+            true_both.append({"t0": t0, "a1": a1, "b": b, "a2": a2, "k1": k1, "k2": k2})
+
+        elif p < frac_both + (1.0 - frac_both) / 2.0:
+            # solo serie 1
+            mu1 += _signal_profile(t, t0, a1, b)
+            true_only1.append({"t0": t0, "a1": a1, "b": b, "k1": k1})
+
+        else:
+            # solo serie 2 (usa a1 come ampiezza per serie 2, riscalato)
+            a2 = min(a1, k2 * 0.93)
+            mu2 += _signal_profile(t, t0, a2, b)
+            true_only2.append({"t0": t0, "a2": a2, "b": b, "k2": k2})
+
+    np.clip(mu1, 1e-9, None, out=mu1)
+    np.clip(mu2, 1e-9, None, out=mu2)
+
+    data1 = rng.poisson(mu1).astype(np.float64)
+    data2 = rng.poisson(mu2).astype(np.float64)
+
+    return data1, data2, true_both, true_only1, true_only2
