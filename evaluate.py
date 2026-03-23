@@ -443,23 +443,27 @@ def run_evaluation(config_path: str | Path) -> dict:
     config_path = Path(config_path)
     config      = load_config(config_path)
 
-    N       = int(config["series"]["length"])
-    k       = float(config["background"]["k"])
-    n_real  = int(config["series"]["n_realizations"])
-    det_cfg = config["detection"]
-    out_cfg = config["output"]
-    seed0   = int(det_cfg.get("seed", 42))
+    N          = int(config["series"]["length"])
+    k          = float(config["background"]["k"])
+    n_real     = int(config["series"]["n_realizations"])
+    det_cfg    = config["detection"]
+    out_cfg    = config["output"]
+    seed0      = int(det_cfg.get("seed", 42))
+    dt_seconds = float(config["series"].get("dt_seconds", 3600.0))
+    tau_rise_max = float(det_cfg.get("tau_rise_max_samples", 0.0))
+    k_method   = det_cfg.get("k_method", "sigma_clip")
 
     # ── calibrazione soglia ───────────────────────────────────────────────────
     print(f"[evaluate] Calibrazione soglia  k={k}  N={N}  "
           f"n_sim={det_cfg['n_sim']}  n_cal={det_cfg['n_cal']} ...")
     threshold = calibrate_threshold(
-        k     = k,
-        N     = N,
-        n_cal = int(det_cfg["n_cal"]),
-        fpr   = float(det_cfg["fpr"]),
-        n_sim = int(det_cfg["n_sim"]),
-        seed  = seed0,
+        k          = k,
+        N          = N,
+        n_cal      = int(det_cfg["n_cal"]),
+        fpr        = float(det_cfg["fpr"]),
+        n_sim      = int(det_cfg["n_sim"]),
+        seed       = seed0,
+        dt_seconds = dt_seconds,
     )
     print(f"[evaluate] Soglia LLR = {threshold:.4f}")
 
@@ -470,7 +474,10 @@ def run_evaluation(config_path: str | Path) -> dict:
     for i in range(n_real):
         seed_i = seed0 + i + 1
         data, true_signals = generate_data(config, seed=seed_i)
-        detected           = find_signals(data, threshold=threshold, k=k)
+        detected           = find_signals(
+            data, threshold=threshold, k=k,
+            dt_seconds=dt_seconds, tau_rise_max=tau_rise_max, k_method=k_method,
+        )
 
         matches, missed_sigs, false_pos = _match_signals(true_signals, detected)
 

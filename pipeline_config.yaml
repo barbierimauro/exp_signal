@@ -2,78 +2,101 @@
 # ====================
 # Configurazione unificata per tutte le modalità della pipeline.
 #
-# Modalità disponibili  (campo "mode"):
+# Modalità disponibili (campo "mode"):
 #   simulate       : genera serie singola sintetica, valuta detector
 #   evaluate_dual  : genera coppie di serie correlate, valuta detector duale
-#   search_file    : legge CSV (datetime ISO + 2 colonne), cerca segnali
+#   search_file    : legge CSV (datetime ISO + 1-2 colonne), cerca FD reali
+#
+# NOTA SUL CAMPIONAMENTO:
+#   series.dt_seconds specifica la durata del campione.
+#   I parametri b e tau_rise nei segnali sono in CAMPIONI.
+#   Esempio dt=3600s: b=24 campioni = 24 ore, b=240 campioni = 10 giorni.
+#
+# CORREZIONE DI PRESSIONE (solo per search_file):
+#   Specificare pressure_col e barometric_coeff1/2 nella sezione input.
+#   Formula: N_corr = N_raw * exp(β * (P - P_ref))
+#   β tipico: muoni = −0.001÷−0.003 hPa⁻¹; neutroni epitermali: più piccolo.
 
 mode: evaluate_dual
 
 # ── Serie e fondo ─────────────────────────────────────────────────────────────
 series:
-  length: 50000          # campioni per realizzazione
-  n_realizations: 20     # numero di realizzazioni (solo per simulate/evaluate_dual)
+  length: 8760           # campioni per realizzazione (= 1 anno a dt=1h)
+  n_realizations: 10     # numero di realizzazioni (solo per simulate/evaluate_dual)
+  dt_seconds: 3600.0     # durata di ogni campione in secondi
 
 background:
-  k: 100.0               # fondo medio serie 1 (conteggi/campione)
+  k: 1000.0              # fondo medio serie 1 (conteggi/campione)
+                         # Neutroni epitermali: 500-3000 c/h
+                         # Monitor muoni compatti: 5000-50000 c/h
 
 # ── Rumore serie 1 ────────────────────────────────────────────────────────────
 noise:
   type: poisson          # poisson | colored | shot
   colored:
-    exponent: 1.0        # beta: 0=bianco 1=rosa 2=marrone
-    amplitude: 15.0      # RMS del rumore colorato (conteggi)
+    exponent: 1.0
+    amplitude: 30.0
   shot:
-    rate: 0.005          # eventi/campione
-    amplitude_mean: 40.0
-    amplitude_std: 12.0
+    rate: 0.002
+    amplitude_mean: 50.0
+    amplitude_std: 15.0
 
 # ── Segnali iniettati ─────────────────────────────────────────────────────────
 signals:
   n_per_realization:
-    min: 3
-    max: 6
+    min: 1
+    max: 3
   a:
-    min: 5.0             # ampiezza minima del calo (conteggi)
-    max: 80.0
+    min: 5.0             # ampiezza min (conteggi = 0.5% di k=1000)
+    max: 200.0           # ampiezza max (conteggi = 20% di k=1000)
     log_scale: true
   b:
-    min: 2.0             # scala temporale minima (campioni)
-    max: 80.0
+    min: 24.0            # scala temporale min (campioni = 24h per dt=1h)
+    max: 240.0           # scala temporale max (campioni = 10gg per dt=1h)
     log_scale: true
-  min_separation: 300    # distanza minima tra segnali (campioni)
+  tau_rise:
+    min: 6.0             # campioni (= 6h per dt=1h)
+    max: 48.0            # campioni (= 2gg per dt=1h)
+    log_scale: false
+  min_separation: 600    # separazione min tra FD (campioni = 25gg per dt=1h)
 
 # ── Secondo canale (solo evaluate_dual) ───────────────────────────────────────
 dual:
-  k2: 80.0               # fondo medio serie 2
+  k2: 800.0              # fondo medio serie 2 (es. muoni: diverso da neutroni)
 
-  noise2:                # rumore indipendente della serie 2
+  noise2:
     type: poisson
     colored:
       exponent: 1.0
-      amplitude: 10.0
+      amplitude: 25.0
     shot:
-      rate: 0.003
-      amplitude_mean: 30.0
-      amplitude_std: 10.0
+      rate: 0.002
+      amplitude_mean: 40.0
+      amplitude_std: 12.0
 
-  fraction_both: 0.5     # frazione di segnali presenti in entrambi i canali
-  a2_factor:             # rapporto a2/a1 per i segnali "both" (campionato)
-    min: 0.3
-    max: 3.0
+  fraction_both: 0.7     # frazione di FD presenti in entrambi i canali
+  a2_factor:             # rapporto a2/a1 per i segnali "both"
+    min: 0.5             # neutroni hanno FD più grandi dei muoni
+    max: 2.0             # (rigidità più bassa → più sensibili)
     log_scale: true
 
 # ── Input CSV (solo search_file) ──────────────────────────────────────────────
 input:
   file: data.csv
-  datetime_col: timestamp     # colonna datetime (ISO 8601)
-  series1_col:  series_A      # prima serie numerica
-  series2_col:  series_B      # seconda serie numerica (opzionale)
-  series1_label: "Series A"
-  series2_label: "Series B"
+  datetime_col: timestamp       # colonna datetime (ISO 8601)
+  series1_col:  neutrons        # prima serie (es. neutroni epitermali)
+  series2_col:  muons           # seconda serie (es. muoni); null per single-channel
+  series1_label: "Epithermal neutrons"
+  series2_label: "Muons"
   delimiter: ","
-  k1: null               # null = media automatica
+  k1: null               # null = stima automatica con k_method
   k2: null
+
+  # Correzione barometrica (opzionale; 0 = nessuna correzione)
+  pressure_col: null             # nome colonna pressione in hPa (es. "P_hPa")
+  barometric_coeff1: 0.0         # β₁ hPa⁻¹ per series1 (neutroni: ~−0.0005)
+  barometric_coeff2: 0.0         # β₂ hPa⁻¹ per series2 (muoni:   ~−0.002)
+  pressure_ref: null             # hPa; null = media temporale
 
 # ── Detection (comune a tutte le modalità) ────────────────────────────────────
 detection:
@@ -81,6 +104,13 @@ detection:
   n_cal: 30000           # lunghezza serie di calibrazione
   n_sim: 200             # simulazioni Monte Carlo per la soglia
   seed: 42
+  k_method: sigma_clip   # sigma_clip | histogram | mean
+  tau_rise_max_hours: 48.0   # ore; scala max dell'onset (0 = onset istantaneo)
+                              # viene convertito in campioni usando dt_seconds
+  # Equivalente in campioni (calcolato automaticamente dal codice):
+  # tau_rise_max_samples = tau_rise_max_hours * 3600 / dt_seconds
+  # Per evaluate_dual/simulate: usare tau_rise_max_samples direttamente
+  tau_rise_max_samples: 48.0   # campioni per evaluate_dual/simulate (= 48h per dt=1h)
 
 # ── Output ────────────────────────────────────────────────────────────────────
 output:

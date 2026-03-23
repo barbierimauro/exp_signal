@@ -114,6 +114,7 @@ def calibrate_thresholds_dual(
     a_values1: np.ndarray | None = None,
     a_values2: np.ndarray | None = None,
     b_values:  np.ndarray | None = None,
+    dt_seconds: float = 1.0,
 ) -> tuple[float, float, float]:
     """
     Calibra via Monte Carlo tre soglie LLR:
@@ -129,9 +130,9 @@ def calibrate_thresholds_dual(
     """
     rng = np.random.default_rng(seed)
 
-    if a_values1 is None: a_values1, _bv = _default_grids(k1)
-    if a_values2 is None: a_values2, _   = _default_grids(k2)
-    if b_values  is None: _, b_values    = _default_grids(k1)
+    if a_values1 is None: a_values1, _bv = _default_grids(k1, dt_seconds)
+    if a_values2 is None: a_values2, _   = _default_grids(k2, dt_seconds)
+    if b_values  is None: _, b_values    = _default_grids(k1, dt_seconds)
 
     n_windows = max(1.0, N / n_cal)
     fpr_loc   = fpr / n_windows
@@ -169,6 +170,8 @@ def find_signals_dual(
     a_values1: np.ndarray | None = None,
     a_values2: np.ndarray | None = None,
     b_values:  np.ndarray | None = None,
+    dt_seconds:  float = 1.0,
+    tau_rise_max: float = 0.0,
     refine:      bool = True,
     max_signals: int  = 50,
 ) -> dict:
@@ -218,9 +221,9 @@ def find_signals_dual(
     k1 = float(data1.mean()) if k1 is None else float(k1)
     k2 = float(data2.mean()) if k2 is None else float(k2)
 
-    if a_values1 is None: a_values1, _bv = _default_grids(k1)
-    if a_values2 is None: a_values2, _   = _default_grids(k2)
-    if b_values  is None: _, b_values    = _default_grids(k1)
+    if a_values1 is None: a_values1, _bv = _default_grids(k1, dt_seconds)
+    if a_values2 is None: a_values2, _   = _default_grids(k2, dt_seconds)
+    if b_values  is None: _, b_values    = _default_grids(k1, dt_seconds)
 
     a_values1 = np.asarray(a_values1, dtype=np.float64)
     a_values2 = np.asarray(a_values2, dtype=np.float64)
@@ -283,29 +286,34 @@ def find_signals_dual(
         fit_ch2 = in2 or joint_ok
 
         if fit_ch1 and refine:
-            fit1 = _refine(res1, t0_best, k1, max(a0_1, 0.1), b0)
+            fit1 = _refine(res1, t0_best, k1, max(a0_1, 0.1), b0, tau_rise_max)
         elif fit_ch1:
-            fit1 = {"a": a0_1, "b": b0, "llr": float(prof1[t0_best]),
-                    "a_err": np.nan, "b_err": np.nan}
+            fit1 = {"a": a0_1, "b": b0, "tau_rise": 0.0, "llr": float(prof1[t0_best]),
+                    "a_err": np.nan, "b_err": np.nan, "tau_rise_err": np.nan}
 
         if fit_ch2 and refine:
-            fit2 = _refine(res2, t0_best, k2, max(a0_2, 0.1), b0)
+            fit2 = _refine(res2, t0_best, k2, max(a0_2, 0.1), b0, tau_rise_max)
         elif fit_ch2:
-            fit2 = {"a": a0_2, "b": b0, "llr": float(prof2[t0_best]),
-                    "a_err": np.nan, "b_err": np.nan}
+            fit2 = {"a": a0_2, "b": b0, "tau_rise": 0.0, "llr": float(prof2[t0_best]),
+                    "a_err": np.nan, "b_err": np.nan, "tau_rise_err": np.nan}
 
-        _nan = {"a": np.nan, "b": np.nan, "llr": np.nan, "a_err": np.nan, "b_err": np.nan}
+        _nan = {"a": np.nan, "b": np.nan, "tau_rise": np.nan, "llr": np.nan,
+                "a_err": np.nan, "b_err": np.nan, "tau_rise_err": np.nan}
         if fit1 is None: fit1 = _nan
         if fit2 is None: fit2 = _nan
 
         found.append({
-            "t0":      t0_best,
-            "k1":      k1,       "k2":      k2,
-            "a1":      fit1["a"], "b1":      fit1["b"], "llr1":   fit1["llr"],
-            "a1_err":  fit1["a_err"], "b1_err": fit1["b_err"],
-            "a2":      fit2["a"], "b2":      fit2["b"], "llr2":   fit2["llr"],
-            "a2_err":  fit2["a_err"], "b2_err": fit2["b_err"],
-            "category": category,
+            "t0":           t0_best,
+            "k1":           k1,            "k2":           k2,
+            "a1":           fit1["a"],     "b1":           fit1["b"],
+            "tau_rise1":    fit1["tau_rise"], "llr1":       fit1["llr"],
+            "a1_err":       fit1["a_err"], "b1_err":       fit1["b_err"],
+            "tau_rise1_err": fit1["tau_rise_err"],
+            "a2":           fit2["a"],     "b2":           fit2["b"],
+            "tau_rise2":    fit2["tau_rise"], "llr2":       fit2["llr"],
+            "a2_err":       fit2["a_err"], "b2_err":       fit2["b_err"],
+            "tau_rise2_err": fit2["tau_rise_err"],
+            "category":     category,
         })
 
         # sottrai contributo anomalo dai residui
@@ -595,29 +603,42 @@ def write_dual_report(
     ]
 
     # --- tabella per categoria ---
+    # controlla se i segnali hanno datetime (arricchiti da enrich_signals_with_time)
+    all_sigs_flat = [s for sigs in results.values() for s in sigs]
+    has_datetime = bool(all_sigs_flat and "t0_datetime" in all_sigs_flat[0])
+
     def _fmt_table(cat: str, sigs: list[dict]) -> list[str]:
         if not sigs:
             return [f"  (none)", ""]
 
+        def _f(v):  return f"{v:8.3f}" if np.isfinite(v) else "     nan"
+        def _fe(v): return f"{v:6.2f}" if np.isfinite(v) else "   nan"
+        def _ft(v): return f"{v:9.4f}" if np.isfinite(v) else "      nan"
+
         both_chans = cat in ("both", "joint_only")
 
         if both_chans:
-            hdr = (f"  {'#':>4}  {'t0':>8}  "
-                   f"{'a1':>8}  {'±':>6}  {'b1':>7}  {'±':>6}  {'llr1':>7}  "
-                   f"{'a2':>8}  {'±':>6}  {'b2':>7}  {'±':>6}  {'llr2':>7}")
+            if has_datetime:
+                hdr = (f"  {'#':>4}  {'t0_datetime':>19}  {'MJD':>11}  "
+                       f"{'a1':>8}  {'±':>6}  {'b1':>7}  {'τ₁':>7}  {'llr1':>7}  "
+                       f"{'a2':>8}  {'±':>6}  {'b2':>7}  {'τ₂':>7}  {'llr2':>7}")
+            else:
+                hdr = (f"  {'#':>4}  {'t0':>8}  "
+                       f"{'a1':>8}  {'±':>6}  {'b1':>7}  {'τ₁':>7}  {'llr1':>7}  "
+                       f"{'a2':>8}  {'±':>6}  {'b2':>7}  {'τ₂':>7}  {'llr2':>7}")
             row_sep = "  " + "-" * (len(hdr) - 2)
             rows = [hdr, row_sep]
             for i, s in enumerate(sigs):
-                def _f(v): return f"{v:8.3f}" if np.isfinite(v) else "     nan"
-                def _fe(v): return f"{v:6.2f}" if np.isfinite(v) else "   nan"
+                t0_str = f"  {i+1:>4}  {s['t0_datetime']:>19}  {s.get('t0_mjd', np.nan):>11.5f}  " \
+                         if has_datetime else f"  {i+1:>4}  {s['t0']:>8}  "
                 rows.append(
-                    f"  {i+1:>4}  {s['t0']:>8}  "
-                    f"{_f(s['a1'])}  {_fe(s['a1_err'])}  "
-                    f"{_f(s['b1']):>7}  {_fe(s['b1_err'])}  "
-                    f"{_f(s['llr1']):>7}  "
-                    f"{_f(s['a2'])}  {_fe(s['a2_err'])}  "
-                    f"{_f(s['b2']):>7}  {_fe(s['b2_err'])}  "
-                    f"{_f(s['llr2']):>7}"
+                    t0_str
+                    + f"{_f(s['a1'])}  {_fe(s['a1_err'])}  "
+                    + f"{_f(s['b1']):>7}  {_ft(s.get('tau_rise1', np.nan)):>7}  "
+                    + f"{_f(s['llr1']):>7}  "
+                    + f"{_f(s['a2'])}  {_fe(s['a2_err'])}  "
+                    + f"{_f(s['b2']):>7}  {_ft(s.get('tau_rise2', np.nan)):>7}  "
+                    + f"{_f(s['llr2']):>7}"
                 )
         else:
             ak  = "a1" if cat == "only1" else "a2"
@@ -625,18 +646,23 @@ def write_dual_report(
             lk  = "llr1" if cat == "only1" else "llr2"
             aek = "a1_err" if cat == "only1" else "a2_err"
             bek = "b1_err" if cat == "only1" else "b2_err"
-            hdr = (f"  {'#':>4}  {'t0':>8}  {'a':>8}  {'±':>6}  "
-                   f"{'b':>8}  {'±':>6}  {'llr':>8}")
+            trk = "tau_rise1" if cat == "only1" else "tau_rise2"
+            if has_datetime:
+                hdr = (f"  {'#':>4}  {'t0_datetime':>19}  {'MJD':>11}  "
+                       f"{'a':>8}  {'±':>6}  {'b':>8}  {'τ_rise':>8}  {'llr':>8}")
+            else:
+                hdr = (f"  {'#':>4}  {'t0':>8}  {'a':>8}  {'±':>6}  "
+                       f"{'b':>8}  {'τ_rise':>8}  {'llr':>8}")
             row_sep = "  " + "-" * (len(hdr) - 2)
             rows = [hdr, row_sep]
             for i, s in enumerate(sigs):
-                def _f(v): return f"{v:8.3f}" if np.isfinite(v) else "     nan"
-                def _fe(v): return f"{v:6.2f}" if np.isfinite(v) else "   nan"
+                t0_str = f"  {i+1:>4}  {s['t0_datetime']:>19}  {s.get('t0_mjd', np.nan):>11.5f}  " \
+                         if has_datetime else f"  {i+1:>4}  {s['t0']:>8}  "
                 rows.append(
-                    f"  {i+1:>4}  {s['t0']:>8}  "
-                    f"{_f(s[ak])}  {_fe(s[aek])}  "
-                    f"{_f(s[bk]):>8}  {_fe(s[bek])}  "
-                    f"{_f(s[lk]):>8}"
+                    t0_str
+                    + f"{_f(s[ak])}  {_fe(s[aek])}  "
+                    + f"{_f(s[bk]):>8}  {_ft(s.get(trk, np.nan)):>8}  "
+                    + f"{_f(s[lk]):>8}"
                 )
         return rows + [""]
 

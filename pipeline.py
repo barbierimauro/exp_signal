@@ -36,7 +36,7 @@ from evaluate    import run_evaluation, _cp68, _efficiency_with_errors, _publica
 from dual_search import (calibrate_thresholds_dual, find_signals_dual,
                           plot_dual_results, write_dual_report, _CAT_COLOR, _CAT_LABEL)
 from main        import calibrate_threshold, find_signals
-from io_utils    import load_csv, datetime_axis
+from io_utils    import load_csv, datetime_axis, enrich_signals_with_time
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -280,16 +280,18 @@ def _run_simulate(config, config_path):
 
 def _run_evaluate_dual(config):
     N, k1 = int(config["series"]["length"]), float(config["background"]["k"])
-    k2     = float(config["dual"]["k2"])
-    n_r    = int(config["series"]["n_realizations"])
-    det    = config["detection"]
-    out    = config["output"]
-    seed0  = int(det.get("seed", 42))
+    k2           = float(config["dual"]["k2"])
+    n_r          = int(config["series"]["n_realizations"])
+    det          = config["detection"]
+    out          = config["output"]
+    seed0        = int(det.get("seed", 42))
+    dt_seconds   = float(config["series"].get("dt_seconds", 3600.0))
+    tau_rise_max = float(det.get("tau_rise_max_samples", 0.0))
 
     print(f"[pipeline] Calibrazione soglie dual  k1={k1} k2={k2} N={N} ...")
     thr1, thr2, thrj = calibrate_thresholds_dual(
         k1, k2, N, n_cal=det["n_cal"], fpr=det["fpr"],
-        n_sim=det["n_sim"], seed=seed0)
+        n_sim=det["n_sim"], seed=seed0, dt_seconds=dt_seconds)
     print(f"[pipeline] thr1={thr1:.3f}  thr2={thr2:.3f}  thrj={thrj:.3f}")
 
     all_stats = []
@@ -300,7 +302,8 @@ def _run_evaluate_dual(config):
 
     for i in range(n_r):
         d1, d2, tb, to1, to2 = generate_dual_data(config, seed=seed0 + i + 1)
-        res   = find_signals_dual(d1, d2, thr1, thr2, thrj, k1=k1, k2=k2)
+        res   = find_signals_dual(d1, d2, thr1, thr2, thrj, k1=k1, k2=k2,
+                                  dt_seconds=dt_seconds, tau_rise_max=tau_rise_max)
         stats = _match_dual_eval(tb, to1, to2, res)
         all_stats.append(stats)
 
@@ -363,33 +366,51 @@ def _run_search_file(config):
     out   = config["output"]
     seed0 = int(det.get("seed", 42))
 
-    s2col    = inp.get("series2_col") or None
-    k1_user  = inp.get("k1") or None
-    k2_user  = inp.get("k2") or None
-    lbl1     = inp.get("series1_label", inp["series1_col"])
-    lbl2     = inp.get("series2_label", inp.get("series2_col", "Series 2"))
+    s2col        = inp.get("series2_col") or None
+    k1_user      = inp.get("k1") or None
+    k2_user      = inp.get("k2") or None
+    lbl1         = inp.get("series1_label", inp["series1_col"])
+    lbl2         = inp.get("series2_label", inp.get("series2_col", "Series 2"))
+    k_method     = det.get("k_method", "sigma_clip")
+    pressure_col = inp.get("pressure_col") or None
+    bcoeff1      = float(inp.get("barometric_coeff1", 0.0))
+    bcoeff2      = float(inp.get("barometric_coeff2", 0.0))
+    p_ref        = inp.get("pressure_ref") or None
 
     print(f"[pipeline] Lettura {inp['file']} ...")
     ts, d1, d2, info = load_csv(
         inp["file"],
-        datetime_col = inp["datetime_col"],
-        series1_col  = inp["series1_col"],
-        series2_col  = s2col,
-        delimiter    = inp.get("delimiter", ","),
+        datetime_col       = inp["datetime_col"],
+        series1_col        = inp["series1_col"],
+        series2_col        = s2col,
+        delimiter          = inp.get("delimiter", ","),
         k1 = k1_user, k2 = k2_user,
+        k_method           = k_method,
+        pressure_col       = pressure_col,
+        barometric_coeff1  = bcoeff1,
+        barometric_coeff2  = bcoeff2,
+        pressure_ref       = float(p_ref) if p_ref is not None else None,
     )
-    N  = info["N"]
-    k1 = info["k1"]
-    print(f"[pipeline] N={N}  dt={info['sampling_seconds']:.2f}s  "
+    N          = info["N"]
+    k1         = info["k1"]
+    dt_seconds = info["dt_seconds"]
+    tau_rise_max_h = float(det.get("tau_rise_max_hours", 0.0))
+    tau_rise_max   = tau_rise_max_h * 3600.0 / dt_seconds if tau_rise_max_h > 0 else 0.0
+
+    print(f"[pipeline] N={N}  dt={dt_seconds:.2f}s  "
           f"{info['start']} → {info['end']}")
+    if pressure_col:
+        print(f"[pipeline] Correzione pressione: β1={bcoeff1:.4f}  β2={bcoeff2:.4f}  "
+              f"P_ref={info.get('pressure_ref', 'n/a'):.2f} hPa")
 
     plot_path   = Path(out["plot_file"])
     report_path = Path(out["report_file"])
     dpi         = int(out.get("dpi", 300))
 
     extra = {"File": inp["file"], "N": N,
-             "Sampling": f"{info['sampling_seconds']:.3f} s",
-             "Period": f"{info['start']} – {info['end']}"}
+             "Sampling": f"{dt_seconds:.3f} s",
+             "Period": f"{info['start']} – {info['end']}",
+             "k_method": k_method}
 
     if d2 is not None:
         k2 = info["k2"]
@@ -397,11 +418,15 @@ def _run_search_file(config):
         print("[pipeline] Calibrazione soglie dual ...")
         thr1, thr2, thrj = calibrate_thresholds_dual(
             k1, k2, N, n_cal=det["n_cal"], fpr=det["fpr"],
-            n_sim=det["n_sim"], seed=seed0)
+            n_sim=det["n_sim"], seed=seed0, dt_seconds=dt_seconds)
         print(f"[pipeline] thr1={thr1:.3f}  thr2={thr2:.3f}  thrj={thrj:.3f}")
 
-        results = find_signals_dual(d1, d2, thr1, thr2, thrj, k1=k1, k2=k2)
-        n_tot   = sum(len(v) for v in results.values())
+        results = find_signals_dual(
+            d1, d2, thr1, thr2, thrj, k1=k1, k2=k2,
+            dt_seconds=dt_seconds, tau_rise_max=tau_rise_max)
+        enrich_signals_with_time(results, ts)
+
+        n_tot = sum(len(v) for v in results.values())
         print(f"[pipeline] Detections: "
               f"both={len(results['both'])}  joint={len(results['joint_only'])}  "
               f"only1={len(results['only1'])}  only2={len(results['only2'])}")
@@ -423,10 +448,14 @@ def _run_search_file(config):
         print(f"[pipeline] Single-channel  k1={k1:.2f}")
         print("[pipeline] Calibrazione soglia ...")
         thr = calibrate_threshold(k1, N, n_cal=det["n_cal"],
-                                  fpr=det["fpr"], n_sim=det["n_sim"], seed=seed0)
+                                  fpr=det["fpr"], n_sim=det["n_sim"],
+                                  seed=seed0, dt_seconds=dt_seconds)
         print(f"[pipeline] threshold={thr:.3f}")
 
-        sigs = find_signals(d1, threshold=thr, k=k1)
+        sigs = find_signals(d1, threshold=thr, k=k1,
+                            dt_seconds=dt_seconds, tau_rise_max=tau_rise_max,
+                            k_method=k_method)
+        enrich_signals_with_time(sigs, ts)
         print(f"[pipeline] Segnali trovati: {len(sigs)}")
 
         # plot single-channel
@@ -451,23 +480,35 @@ def _run_search_file(config):
         fig.savefig(plot_path, dpi=dpi); plt.close(fig)
 
         # report ASCII
-        W = 78
+        def _f(v): return f"{v:.3f}" if np.isfinite(v) else "nan"
+        has_dt = bool(sigs and "t0_datetime" in sigs[0])
+        W = 96 if has_dt else 78
         lines = ["="*W, "  SINGLE-CHANNEL SEARCH REPORT",
                  f"  {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M:%S UTC')}",
                  "="*W, ""]
-        for k, v in extra.items():
-            lines.append(f"  {k:<24}: {v}")
+        for kk, v in extra.items():
+            lines.append(f"  {kk:<24}: {v}")
         lines += [f"  {'LLR threshold':<24}: {thr:.4f}",
-                  f"  {'Signals found':<24}: {len(sigs)}", "",
-                  "-"*W,
-                  f"  {'#':>4}  {'t0':>8}  {'a':>8}  {'±':>6}  "
-                  f"{'b':>8}  {'±':>6}  {'llr':>8}",
-                  "-"*W]
+                  f"  {'Signals found':<24}: {len(sigs)}", "", "-"*W]
+        if has_dt:
+            lines.append(
+                f"  {'#':>4}  {'t0_datetime':>19}  {'MJD':>11}  "
+                f"{'a':>8}  {'±':>6}  {'b':>8}  {'±':>6}  {'τ_rise':>8}  {'llr':>8}")
+        else:
+            lines.append(
+                f"  {'#':>4}  {'t0':>8}  {'a':>8}  {'±':>6}  "
+                f"{'b':>8}  {'±':>6}  {'τ_rise':>8}  {'llr':>8}")
+        lines.append("-"*W)
         for i, s in enumerate(sigs):
-            def _f(v): return f"{v:.3f}" if np.isfinite(v) else "nan"
-            lines.append(f"  {i+1:>4}  {s['t0']:>8}  {_f(s['a']):>8}  "
-                         f"{_f(s['a_err']):>6}  {_f(s['b']):>8}  "
-                         f"{_f(s['b_err']):>6}  {_f(s['llr']):>8}")
+            if has_dt:
+                t0_str = f"  {i+1:>4}  {s['t0_datetime']:>19}  {s.get('t0_mjd', float('nan')):>11.5f}  "
+            else:
+                t0_str = f"  {i+1:>4}  {s['t0']:>8}  "
+            lines.append(
+                t0_str
+                + f"{_f(s['a']):>8}  {_f(s['a_err']):>6}  "
+                + f"{_f(s['b']):>8}  {_f(s['b_err']):>6}  "
+                + f"{_f(s.get('tau_rise', 0.0)):>8}  {_f(s['llr']):>8}")
         lines += ["-"*W, "", "="*W, "  END OF REPORT", "="*W, ""]
         Path(report_path).write_text("\n".join(lines), encoding="utf-8")
         return sigs

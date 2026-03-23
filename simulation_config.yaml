@@ -1,52 +1,73 @@
 # simulation_config.yaml
 # ======================
-# Configurazione per la generazione di dati sintetici e la valutazione del detector.
+# Configurazione per la generazione di serie sintetiche e la valutazione
+# del detector di Forbush Decrease (FD).
 #
-# Tipi di rumore disponibili:
+# NOTA SUL CAMPIONAMENTO:
+#   dt_seconds specifica la durata di ogni campione.
+#   I parametri b e tau_rise sono in CAMPIONI.
+#   Conversione: b_campioni = b_ore * 3600 / dt_seconds
+#
+#   Esempio con dt=3600s (1h):
+#     b = 24  campioni  =  24 ore
+#     b = 240 campioni  =  10 giorni
+#     tau_rise = 12     =  12 ore
+#
+# Tipi di rumore:
 #   poisson : puro rumore poissoniano sul fondo costante k  (caso base)
 #   colored : rumore 1/f^beta aggiunto al fondo (usa colorednoise)
-#   shot    : picchi stocastici (glitch, raggi cosmici) + fondo Poisson
+#   shot    : picchi stocastici + fondo Poisson
 
 series:
-  length: 50000          # lunghezza di ogni serie temporale (campioni)
-  n_realizations: 50     # numero di realizzazioni Monte Carlo
+  length: 8760           # campioni (= 1 anno per dt=1h, o 365 giorni per dt=1d)
+  n_realizations: 20     # numero di realizzazioni Monte Carlo
+  dt_seconds: 3600.0     # durata di ogni campione in secondi (1h = 3600s)
 
 background:
-  k: 100.0               # livello medio del fondo (conteggi/campione)
+  k: 1000.0              # livello medio del fondo (conteggi/campione)
+                         # Tipico per sonde neutroni epitermali: 500-3000 c/h
+                         # Tipico per monitor muoni compatti: 5000-50000 c/h
 
 noise:
   type: poisson          # "poisson" | "colored" | "shot"
 
   colored:
     exponent: 1.0        # beta: 0=bianco, 1=rosa, 2=marrone/rosso
-    amplitude: 15.0      # ampiezza RMS del rumore colorato (conteggi)
+    amplitude: 30.0      # ampiezza RMS del rumore colorato (conteggi)
 
   shot:
-    rate: 0.005          # frequenza media degli eventi (eventi/campione)
-    amplitude_mean: 40.0 # ampiezza media di ogni picco (conteggi)
-    amplitude_std: 12.0  # dispersione dell'ampiezza (conteggi)
+    rate: 0.002          # frequenza media degli eventi (eventi/campione)
+    amplitude_mean: 50.0 # ampiezza media di ogni picco (conteggi)
+    amplitude_std: 15.0  # dispersione dell'ampiezza (conteggi)
 
 signals:
   n_per_realization:
-    min: 2               # segnali minimi per realizzazione
-    max: 5               # segnali massimi per realizzazione
+    min: 1               # FD minimi per realizzazione
+    max: 3               # FD massimi per realizzazione
   a:
-    min: 5.0             # ampiezza minima del calo (conteggi)
-    max: 80.0            # ampiezza massima del calo (conteggi)
+    min: 5.0             # ampiezza minima del calo (conteggi = 0.5% di k=1000)
+    max: 200.0           # ampiezza massima del calo (conteggi = 20% di k=1000)
     log_scale: true      # campiona in scala logaritmica
   b:
-    min: 2.0             # scala temporale minima del recupero (campioni)
-    max: 80.0            # scala temporale massima del recupero (campioni)
-    log_scale: true      # campiona in scala logaritmica
-  min_separation: 300    # distanza minima tra segnali (campioni)
+    min: 24.0            # scala temporale min di recupero (campioni = 24h per dt=1h)
+    max: 240.0           # scala temporale max di recupero (campioni = 10gg per dt=1h)
+    log_scale: true
+  tau_rise:              # scala temporale dell'onset del calo
+    min: 6.0             # campioni (= 6h per dt=1h)
+    max: 48.0            # campioni (= 2 giorni per dt=1h)
+    log_scale: false
+  min_separation: 600    # separazione minima tra FD (campioni = 25 giorni per dt=1h)
 
 detection:
   fpr: 0.01              # false positive rate GLOBALE desiderato
   n_cal: 30000           # lunghezza serie di calibrazione (campioni)
   n_sim: 200             # simulazioni Monte Carlo per la soglia
   seed: 42               # seme per riproducibilità
+  k_method: sigma_clip   # stima del fondo: sigma_clip | histogram | mean
+  tau_rise_max_samples: 72.0  # tau_rise max per il raffinamento (= 72h per dt=1h)
+                              # 0 = disabilitato (onset istantaneo)
 
 output:
   report_file: detection_report.txt   # report ASCII delle detections
-  plot_file: detection_results.pdf    # grafici (qualita' pubblicazione)
+  plot_file: detection_results.pdf    # grafici (qualità pubblicazione)
   dpi: 300                            # risoluzione per formati raster

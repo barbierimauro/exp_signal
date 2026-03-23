@@ -2,7 +2,7 @@
 simulate.py
 ===========
 Genera serie temporali sintetiche con rumore e segnali iniettati per la
-valutazione del detector di segnali exp-drop.
+valutazione del detector di Forbush Decrease.
 
 Tipi di rumore supportati
 --------------------------
@@ -12,8 +12,18 @@ Tipi di rumore supportati
   shot    : picchi impulsivi casuali (glitch, raggi cosmici) sovrapposti al
             fondo Poisson; rappresenta un fondo contaminato da outlier positivi
 
-Nota: il detector assume fondo piatto k; rumore colorato e shot noise
-degradano le prestazioni in modo fisicamente realistico.
+Modello del segnale
+-------------------
+    mu(t) = k - a * (1 - exp(-(t-t0)/tau_rise)) * exp(-(t-t0)/b)  per t > t0
+    mu(t) = k                                                        per t <= t0
+
+Per tau_rise = 0: onset istantaneo (drop immediato a k-a).
+
+Configurazione temporale
+-------------------------
+Il campo ``series.dt_seconds`` specifica la durata di ogni campione in secondi.
+I parametri b e tau_rise nel file di configurazione sono espressi in campioni.
+Per convertire da ore: b_campioni = b_ore * 3600 / dt_seconds.
 
 Funzioni pubbliche
 ------------------
@@ -42,14 +52,36 @@ def load_config(path: str | Path) -> dict:
 
 # ── modello segnale (coerente con main.py) ────────────────────────────────────
 
-def _signal_profile(t: np.ndarray, t0: int, a: float, b: float) -> np.ndarray:
+def _signal_profile(
+    t: np.ndarray,
+    t0: int,
+    a: float,
+    b: float,
+    tau_rise: float = 0.0,
+) -> np.ndarray:
     """
     Contributo negativo di un segnale exp-drop al profilo mu:
-        delta_mu[t] = -a * exp(-(t - t0) / b)   per t > t0
-                    = 0                           per t <= t0
+
+        delta_mu[t] = -a * (1 - exp(-(t-t0)/tau_rise)) * exp(-(t-t0)/b)
+                      per t > t0, 0 altrimenti.
+
+    Per tau_rise = 0: onset istantaneo.
     """
-    exponent = np.where(t <= t0, 0.0, -(t - t0) / b)
-    return np.where(t <= t0, 0.0, -a * np.exp(np.clip(exponent, -500, 0)))
+    after = t > t0
+    s = np.where(after, t - t0, 0.0)
+
+    exponent_b = np.where(after, -s / b, 0.0)
+    decay = np.where(after, a * np.exp(np.clip(exponent_b, -500, 0)), 0.0)
+
+    if tau_rise > 0.0:
+        rise_factor = np.where(
+            after,
+            1.0 - np.exp(np.clip(-s / tau_rise, -500, 0)),
+            0.0,
+        )
+        decay = decay * rise_factor
+
+    return -decay
 
 
 # ── iniezione segnali ─────────────────────────────────────────────────────────
@@ -63,7 +95,9 @@ def _inject_signals(
     """
     Inietta segnali exp-drop casuali in ``mu`` in-place.
 
-    Ritorna lista di dict {t0, a, b, k} che descrive i segnali iniettati.
+    I parametri b e tau_rise sono in campioni (non in ore).
+
+    Ritorna lista di dict {t0, a, b, tau_rise, k} che descrive i segnali iniettati.
     """
     N = len(mu)
     t = np.arange(N, dtype=np.float64)
@@ -72,13 +106,19 @@ def _inject_signals(
     n_max = int(cfg_signals["n_per_realization"]["max"])
     n_sig = int(rng.integers(n_min, n_max + 1))
 
-    a_min    = float(cfg_signals["a"]["min"])
-    a_max    = float(cfg_signals["a"]["max"])
-    log_a    = bool(cfg_signals["a"].get("log_scale", True))
-    b_min    = float(cfg_signals["b"]["min"])
-    b_max    = float(cfg_signals["b"]["max"])
-    log_b    = bool(cfg_signals["b"].get("log_scale", True))
-    min_sep  = int(cfg_signals.get("min_separation", 200))
+    a_min   = float(cfg_signals["a"]["min"])
+    a_max   = float(cfg_signals["a"]["max"])
+    log_a   = bool(cfg_signals["a"].get("log_scale", True))
+    b_min   = float(cfg_signals["b"]["min"])
+    b_max   = float(cfg_signals["b"]["max"])
+    log_b   = bool(cfg_signals["b"].get("log_scale", True))
+    min_sep = int(cfg_signals.get("min_separation", 200))
+
+    # tau_rise opzionale
+    tau_cfg = cfg_signals.get("tau_rise", None)
+    tau_min = float(tau_cfg["min"]) if tau_cfg else 0.0
+    tau_max = float(tau_cfg["max"]) if tau_cfg else 0.0
+    log_tau = bool(tau_cfg.get("log_scale", False)) if tau_cfg else False
 
     true_signals: list[dict] = []
     occupied:     list[int]  = []
@@ -89,13 +129,22 @@ def _inject_signals(
             a = float(np.exp(rng.uniform(np.log(a_min), np.log(a_max))))
         else:
             a = float(rng.uniform(a_min, a_max))
-        a = min(a, k * 0.93)  # garantisce a/k < 0.93 (validità espansione Taylor)
+        a = min(a, k * 0.30)   # FD: massimo 30% del fondo
 
         # campiona b
         if log_b:
             b = float(np.exp(rng.uniform(np.log(b_min), np.log(b_max))))
         else:
             b = float(rng.uniform(b_min, b_max))
+
+        # campiona tau_rise (0 se non configurato)
+        if tau_cfg and tau_max > 0:
+            if log_tau and tau_min > 0:
+                tau_rise = float(np.exp(rng.uniform(np.log(tau_min), np.log(tau_max))))
+            else:
+                tau_rise = float(rng.uniform(tau_min, tau_max))
+        else:
+            tau_rise = 0.0
 
         # cerca t0 libero (lontano dagli altri segnali e dai bordi)
         margin = max(min_sep, int(10 * b))
@@ -109,8 +158,8 @@ def _inject_signals(
             continue  # spazio esaurito, segnale saltato
 
         occupied.append(t0)
-        mu += _signal_profile(t, t0, a, b)
-        true_signals.append({"t0": t0, "a": a, "b": b, "k": k})
+        mu += _signal_profile(t, t0, a, b, tau_rise)
+        true_signals.append({"t0": t0, "a": a, "b": b, "tau_rise": tau_rise, "k": k})
 
     return true_signals
 
@@ -129,11 +178,11 @@ def _add_colored_noise(mu: np.ndarray, cfg: dict, rng: np.random.Generator) -> N
 
 def _add_shot_noise(mu: np.ndarray, cfg: dict, rng: np.random.Generator) -> None:
     """Aggiunge picchi impulsivi casuali (shot noise) a mu in-place."""
-    N         = len(mu)
-    rate      = float(cfg["rate"])
-    amp_mean  = float(cfg["amplitude_mean"])
-    amp_std   = float(cfg.get("amplitude_std", amp_mean * 0.3))
-    n_shots   = int(rng.poisson(rate * N))
+    N        = len(mu)
+    rate     = float(cfg["rate"])
+    amp_mean = float(cfg["amplitude_mean"])
+    amp_std  = float(cfg.get("amplitude_std", amp_mean * 0.3))
+    n_shots  = int(rng.poisson(rate * N))
     if n_shots == 0:
         return
     times = rng.integers(0, N, size=n_shots)
@@ -158,21 +207,20 @@ def generate_data(
     Ritorna
     -------
     data         : array 1D float64 di conteggi (campionati da Poisson)
-    true_signals : lista di dict {t0, a, b, k} — parametri veri dei segnali
+    true_signals : lista di dict {t0, a, b, tau_rise, k}
     """
     rng = np.random.default_rng(seed)
 
-    N         = int(config["series"]["length"])
-    k         = float(config["background"]["k"])
-    noise_cfg = config["noise"]
+    N          = int(config["series"]["length"])
+    k          = float(config["background"]["k"])
+    noise_cfg  = config["noise"]
     noise_type = noise_cfg["type"].lower()
 
-    # profilo di valor medio (fondo piatto + rumore deterministico + segnali)
     mu = np.full(N, k, dtype=np.float64)
 
     if noise_type == "colored":
         _add_colored_noise(mu, noise_cfg["colored"], rng)
-        np.clip(mu, 1.0, None, out=mu)          # evita mu negativi
+        np.clip(mu, 1.0, None, out=mu)
     elif noise_type == "shot":
         _add_shot_noise(mu, noise_cfg["shot"], rng)
     elif noise_type != "poisson":
@@ -181,13 +229,9 @@ def generate_data(
             "Valori validi: poisson, colored, shot."
         )
 
-    # inietta segnali exp-drop
     true_signals = _inject_signals(mu, k, config["signals"], rng)
 
-    # garantisce mu > 0 prima del campionamento
     np.clip(mu, 1e-9, None, out=mu)
-
-    # campionamento poissoniano
     data = rng.poisson(mu).astype(np.float64)
 
     return data, true_signals
@@ -203,29 +247,17 @@ def generate_dual_data(
     Genera due serie temporali correlate per la valutazione del detector duale.
 
     I segnali vengono classificati casualmente come:
-      - **both**  : stesso t0 e b in entrambe le serie, a1 ≠ a2
+      - **both**  : stesso t0, b, tau_rise in entrambe le serie; a1 ≠ a2
       - **only1** : segnale solo nella serie 1
       - **only2** : segnale solo nella serie 2
-
-    La proporzione è controllata da ``dual.fraction_both`` nel config.
-    Il rapporto a2/a1 per i segnali "both" è campionato dall'intervallo
-    ``dual.a2_factor``.
-
-    Richiede nel config le sezioni ``background``, ``noise``, ``signals``
-    (per la serie 1) e ``dual`` (per la serie 2).
-
-    Parametri
-    ---------
-    config : dict da load_config()
-    seed   : seme RNG
 
     Ritorna
     -------
     data1      : array float64 — serie 1
     data2      : array float64 — serie 2
-    true_both  : lista di dict {t0, a1, b, a2, k1, k2}
-    true_only1 : lista di dict {t0, a1, b, k1}
-    true_only2 : lista di dict {t0, a2, b, k2}
+    true_both  : lista di dict {t0, a1, b, tau_rise, a2, k1, k2}
+    true_only1 : lista di dict {t0, a1, b, tau_rise, k1}
+    true_only2 : lista di dict {t0, a2, b, tau_rise, k2}
     """
     rng = np.random.default_rng(seed)
 
@@ -238,12 +270,10 @@ def generate_dual_data(
     noise2_cfg = dual_cfg["noise2"]
 
     frac_both = float(dual_cfg.get("fraction_both", 0.5))
+    a2f_min   = float(dual_cfg["a2_factor"]["min"])
+    a2f_max   = float(dual_cfg["a2_factor"]["max"])
+    log_a2f   = bool(dual_cfg["a2_factor"].get("log_scale", True))
 
-    a2f_min  = float(dual_cfg["a2_factor"]["min"])
-    a2f_max  = float(dual_cfg["a2_factor"]["max"])
-    log_a2f  = bool(dual_cfg["a2_factor"].get("log_scale", True))
-
-    # --- fondi con rumore ---
     mu1 = np.full(N, k1, dtype=np.float64)
     mu2 = np.full(N, k2, dtype=np.float64)
 
@@ -259,18 +289,22 @@ def generate_dual_data(
     elif noise2_cfg["type"] == "shot":
         _add_shot_noise(mu2, noise2_cfg["shot"], rng)
 
-    # --- parametri griglia segnali ---
-    t       = np.arange(N, dtype=np.float64)
-    n_min   = int(sig_cfg["n_per_realization"]["min"])
-    n_max   = int(sig_cfg["n_per_realization"]["max"])
-    n_sig   = int(rng.integers(n_min, n_max + 1))
-    a_min   = float(sig_cfg["a"]["min"])
-    a_max   = float(sig_cfg["a"]["max"])
-    log_a   = bool(sig_cfg["a"].get("log_scale", True))
-    b_min   = float(sig_cfg["b"]["min"])
-    b_max   = float(sig_cfg["b"]["max"])
-    log_b   = bool(sig_cfg["b"].get("log_scale", True))
+    t      = np.arange(N, dtype=np.float64)
+    n_min  = int(sig_cfg["n_per_realization"]["min"])
+    n_max  = int(sig_cfg["n_per_realization"]["max"])
+    n_sig  = int(rng.integers(n_min, n_max + 1))
+    a_min  = float(sig_cfg["a"]["min"])
+    a_max  = float(sig_cfg["a"]["max"])
+    log_a  = bool(sig_cfg["a"].get("log_scale", True))
+    b_min  = float(sig_cfg["b"]["min"])
+    b_max  = float(sig_cfg["b"]["max"])
+    log_b  = bool(sig_cfg["b"].get("log_scale", True))
     min_sep = int(sig_cfg.get("min_separation", 200))
+
+    tau_cfg = sig_cfg.get("tau_rise", None)
+    tau_min = float(tau_cfg["min"]) if tau_cfg else 0.0
+    tau_max = float(tau_cfg["max"]) if tau_cfg else 0.0
+    log_tau = bool(tau_cfg.get("log_scale", False)) if tau_cfg else False
 
     true_both:  list[dict] = []
     true_only1: list[dict] = []
@@ -278,15 +312,21 @@ def generate_dual_data(
     occupied:   list[int]  = []
 
     for _ in range(n_sig):
-        # campiona a1, b
         a1 = float(np.exp(rng.uniform(np.log(a_min), np.log(a_max)))) if log_a \
              else float(rng.uniform(a_min, a_max))
-        a1 = min(a1, k1 * 0.93)
+        a1 = min(a1, k1 * 0.30)
 
         b = float(np.exp(rng.uniform(np.log(b_min), np.log(b_max)))) if log_b \
             else float(rng.uniform(b_min, b_max))
 
-        # cerca t0 libero
+        if tau_cfg and tau_max > 0:
+            if log_tau and tau_min > 0:
+                tau_rise = float(np.exp(rng.uniform(np.log(tau_min), np.log(tau_max))))
+            else:
+                tau_rise = float(rng.uniform(tau_min, tau_max))
+        else:
+            tau_rise = 0.0
+
         margin = max(min_sep, int(10 * b))
         if margin * 2 >= N:
             continue
@@ -301,24 +341,24 @@ def generate_dual_data(
         p = float(rng.uniform())
 
         if p < frac_both:
-            # segnale in entrambe le serie
             fac = float(np.exp(rng.uniform(np.log(a2f_min), np.log(a2f_max)))) if log_a2f \
                   else float(rng.uniform(a2f_min, a2f_max))
-            a2 = min(max(a1 * fac, 0.1), k2 * 0.93)
-            mu1 += _signal_profile(t, t0, a1, b)
-            mu2 += _signal_profile(t, t0, a2, b)
-            true_both.append({"t0": t0, "a1": a1, "b": b, "a2": a2, "k1": k1, "k2": k2})
+            a2 = min(max(a1 * fac, 0.1), k2 * 0.30)
+            mu1 += _signal_profile(t, t0, a1, b, tau_rise)
+            mu2 += _signal_profile(t, t0, a2, b, tau_rise)
+            true_both.append({
+                "t0": t0, "a1": a1, "b": b, "tau_rise": tau_rise,
+                "a2": a2, "k1": k1, "k2": k2,
+            })
 
         elif p < frac_both + (1.0 - frac_both) / 2.0:
-            # solo serie 1
-            mu1 += _signal_profile(t, t0, a1, b)
-            true_only1.append({"t0": t0, "a1": a1, "b": b, "k1": k1})
+            mu1 += _signal_profile(t, t0, a1, b, tau_rise)
+            true_only1.append({"t0": t0, "a1": a1, "b": b, "tau_rise": tau_rise, "k1": k1})
 
         else:
-            # solo serie 2 (usa a1 come ampiezza per serie 2, riscalato)
-            a2 = min(a1, k2 * 0.93)
-            mu2 += _signal_profile(t, t0, a2, b)
-            true_only2.append({"t0": t0, "a2": a2, "b": b, "k2": k2})
+            a2 = min(a1, k2 * 0.30)
+            mu2 += _signal_profile(t, t0, a2, b, tau_rise)
+            true_only2.append({"t0": t0, "a2": a2, "b": b, "tau_rise": tau_rise, "k2": k2})
 
     np.clip(mu1, 1e-9, None, out=mu1)
     np.clip(mu2, 1e-9, None, out=mu2)
