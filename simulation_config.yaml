@@ -1,0 +1,52 @@
+# simulation_config.yaml
+# ======================
+# Configurazione per la generazione di dati sintetici e la valutazione del detector.
+#
+# Tipi di rumore disponibili:
+#   poisson : puro rumore poissoniano sul fondo costante k  (caso base)
+#   colored : rumore 1/f^beta aggiunto al fondo (usa colorednoise)
+#   shot    : picchi stocastici (glitch, raggi cosmici) + fondo Poisson
+
+series:
+  length: 50000          # lunghezza di ogni serie temporale (campioni)
+  n_realizations: 50     # numero di realizzazioni Monte Carlo
+
+background:
+  k: 100.0               # livello medio del fondo (conteggi/campione)
+
+noise:
+  type: poisson          # "poisson" | "colored" | "shot"
+
+  colored:
+    exponent: 1.0        # beta: 0=bianco, 1=rosa, 2=marrone/rosso
+    amplitude: 15.0      # ampiezza RMS del rumore colorato (conteggi)
+
+  shot:
+    rate: 0.005          # frequenza media degli eventi (eventi/campione)
+    amplitude_mean: 40.0 # ampiezza media di ogni picco (conteggi)
+    amplitude_std: 12.0  # dispersione dell'ampiezza (conteggi)
+
+signals:
+  n_per_realization:
+    min: 2               # segnali minimi per realizzazione
+    max: 5               # segnali massimi per realizzazione
+  a:
+    min: 5.0             # ampiezza minima del calo (conteggi)
+    max: 80.0            # ampiezza massima del calo (conteggi)
+    log_scale: true      # campiona in scala logaritmica
+  b:
+    min: 2.0             # scala temporale minima del recupero (campioni)
+    max: 80.0            # scala temporale massima del recupero (campioni)
+    log_scale: true      # campiona in scala logaritmica
+  min_separation: 300    # distanza minima tra segnali (campioni)
+
+detection:
+  fpr: 0.01              # false positive rate GLOBALE desiderato
+  n_cal: 30000           # lunghezza serie di calibrazione (campioni)
+  n_sim: 200             # simulazioni Monte Carlo per la soglia
+  seed: 42               # seme per riproducibilità
+
+output:
+  report_file: detection_report.txt   # report ASCII delle detections
+  plot_file: detection_results.pdf    # grafici (qualita' pubblicazione)
+  dpi: 300                            # risoluzione per formati raster
