@@ -373,15 +373,16 @@ _CAT_LABEL = {
 # ── grafici ───────────────────────────────────────────────────────────────────
 
 def plot_dual_results(
-    data1:    np.ndarray,
-    data2:    np.ndarray,
-    results:  dict,
-    plot_path: str | Path,
-    dpi:      int   = 300,
-    label1:   str   = "Series 1",
-    label2:   str   = "Series 2",
-    k1:       float | None = None,
-    k2:       float | None = None,
+    data1:      np.ndarray,
+    data2:      np.ndarray,
+    results:    dict,
+    plot_path:  str | Path,
+    dpi:        int            = 300,
+    label1:     str            = "Series 1",
+    label2:     str            = "Series 2",
+    k1:         float | None   = None,
+    k2:         float | None   = None,
+    timestamps: np.ndarray | None = None,   # datetime64[ms] da load_csv
 ) -> None:
     """
     Produce figura da pubblicazione con 5 pannelli e la salva in ``plot_path``.
@@ -419,7 +420,7 @@ def plot_dual_results(
     ax4 = fig.add_subplot(gs[2, 1])   # scatter b1 vs b2
     ax5 = fig.add_subplot(gs[2, 2])   # conteggi per categoria
 
-    def _draw_timeseries(ax, data, k_val, label, chan_key_own, chan_key_both):
+    def _draw_timeseries(ax, data, k_val, label, chan_key_own):
         """Disegna una serie con i segnali colorati per categoria."""
         ax.step(t, data, color="0.65", lw=0.5, where="mid", zorder=1)
         ax.axhline(k_val, color="k", ls="--", lw=0.9, zorder=2,
@@ -427,27 +428,30 @@ def plot_dual_results(
         for cat, sigs in results.items():
             col = _CAT_COLOR[cat]
             for s in sigs:
-                # canale 1 vede tutti tranne only2, e viceversa
                 if chan_key_own == "1" and cat == "only2":
                     continue
                 if chan_key_own == "2" and cat == "only1":
                     continue
                 ax.axvline(s["t0"], color=col, lw=1.6, alpha=0.75, zorder=3)
-        ax.set_xlabel("Sample index $t$")
         ax.set_ylabel("Counts")
         ax.set_xlim(0, N - 1)
         ax.set_title(label)
-        # legenda con patch per categoria
-        handles = [Line2D([0], [0], color="0.65",  lw=1,   label="Data"),
-                   Line2D([0], [0], color="k",     lw=0.9, ls="--", label=f"$k={k_val:.0f}$")]
+        handles = [Line2D([0], [0], color="0.65", lw=1,   label="Data"),
+                   Line2D([0], [0], color="k",    lw=0.9, ls="--", label=f"$k={k_val:.0f}$")]
         for cat in ["both", "joint_only", "only1" if chan_key_own == "1" else "only2"]:
             if results.get(cat):
                 handles.append(Line2D([0], [0], color=_CAT_COLOR[cat], lw=1.6,
                                       label=_CAT_LABEL[cat]))
         ax.legend(handles=handles, loc="upper right", framealpha=0.9, fontsize=8.5)
+        # asse x: datetime se disponibile, altrimenti indice campione
+        if timestamps is not None:
+            from io_utils import datetime_axis
+            datetime_axis(ax, timestamps, max_ticks=6)
+        else:
+            ax.set_xlabel("Sample index $t$")
 
-    _draw_timeseries(ax1, data1, k1, label1, "1", "both")
-    _draw_timeseries(ax2, data2, k2, label2, "2", "both")
+    _draw_timeseries(ax1, data1, k1, label1, "1")
+    _draw_timeseries(ax2, data2, k2, label2, "2")
 
     # ── scatter a1 vs a2 ──────────────────────────────────────────────────────
     for cat in ("both", "joint_only"):
